@@ -200,10 +200,17 @@ def download_job(job: dict) -> bool:
 
 def check_usage():
     try:
-        result = lakeapi.used_data(boto3_session=BOTO_SESSION)
-        # used_data() returns a dict: {"downloaded_gb": ..., "timeframe_days": ..., ...}
-        gb = result["downloaded_gb"] if isinstance(result, dict) else result
-        bar_filled = int(gb / 300 * 40)
+        # NOTE: some lakeapi versions break when passing boto3_session as a named
+        # argument due to an internal cache key lambda. Positional call is safer.
+        try:
+            result = lakeapi.used_data(BOTO_SESSION)
+        except TypeError:
+            result = lakeapi.used_data()
+
+        # Newer versions return a dict, older may return a float-like value.
+        gb = result.get("downloaded_gb", 0.0) if isinstance(result, dict) else float(result)
+
+        bar_filled = max(0, min(40, int(gb / 300 * 40)))
         bar = "█" * bar_filled + "░" * (40 - bar_filled)
         pct = gb / 300 * 100
         print(f"\n  Monthly usage: [{bar}] {gb:.1f} / 300 GB ({pct:.1f}%)")
