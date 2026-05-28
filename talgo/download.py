@@ -5,6 +5,7 @@ BTC-USDT-PERP only, everything from 2023-01-01
 """
 
 import datetime
+import os
 import platform
 import sys
 import time
@@ -22,7 +23,18 @@ import pandas as pd
 # ─────────────────────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+# Try common .env locations (repo root, current working directory, script directory)
+ENV_PATHS = [
+    Path.cwd() / ".env",
+    Path(__file__).resolve().parent / ".env",
+    Path(__file__).resolve().parent.parent / ".env",
+]
+LOADED_ENV_PATH = None
+for env_path in ENV_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path)
+        LOADED_ENV_PATH = env_path
+        break
 
 # boto3 will read AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from the environment.
 # You can also override them directly here for quick testing (not recommended):
@@ -32,7 +44,18 @@ load_dotenv(Path(__file__).parent / ".env")
 # Create a single reusable boto3 session for all downloads
 import boto3
 
-BOTO_SESSION = boto3.Session(region_name="eu-west-1")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "eu-west-1")
+
+if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+    BOTO_SESSION = boto3.Session(
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_DEFAULT_REGION,
+    )
+else:
+    BOTO_SESSION = boto3.Session(region_name=AWS_DEFAULT_REGION)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SETTINGS
@@ -222,6 +245,22 @@ def check_usage():
         print(f"  Could not fetch usage: {e}")
 
 
+def ensure_credentials() -> bool:
+    """Validate that boto3 can resolve AWS credentials for lakeapi calls."""
+    creds = BOTO_SESSION.get_credentials()
+    if creds and creds.access_key:
+        return True
+
+    print("\n✗ AWS credentials not found.")
+    print("  Expected: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+    if LOADED_ENV_PATH:
+        print(f"  .env loaded from: {LOADED_ENV_PATH}")
+    else:
+        print("  .env file not found in expected locations.")
+    print("  Try placing .env in repo root and rerun.")
+    return False
+
+
 def show_summary():
     print(f"\n{'─' * 55}")
     print(f"  {'TABLE':<20} {'FILES':>6}  {'SIZE':>10}")
@@ -279,6 +318,10 @@ def run_tier(tier: int):
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
+
+    # Commands that require AWS auth to talk to lakeapi
+    if cmd in {"1", "2", "3", "all", "usage"} and not ensure_credentials():
+        sys.exit(1)
 
     if cmd == "1":
         run_tier(1)
