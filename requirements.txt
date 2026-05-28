@@ -1,0 +1,19 @@
+# Core
+lakeapi
+pandas>=2.0
+numpy>=1.26
+pyarrow>=14.0
+python-dotenv>=1.0
+
+# Research
+jupyterlab>=4.0
+plotly>=5.0
+matplotlib>=3.8
+
+# Backtest & analysis
+vectorbt>=0.26
+quantstats>=0.0.62
+
+# Dev
+pytest>=7.0
+ruff>=0.4
