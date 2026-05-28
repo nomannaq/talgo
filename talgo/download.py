@@ -5,6 +5,7 @@ BTC-USDT-PERP only, everything from 2023-01-01
 """
 
 import datetime
+import platform
 import sys
 import time
 from pathlib import Path
@@ -37,8 +38,12 @@ BOTO_SESSION = boto3.Session(region_name="eu-west-1")
 # SETTINGS
 # ─────────────────────────────────────────────────────────────────────────────
 
-OUTPUT_DIR = Path("/Volumes/KINGSTON/lake_data")
-OUTPUT_DIR.mkdir(exist_ok=True)
+if platform.system() == "Darwin":  # macOS
+    OUTPUT_DIR = Path("/Volumes/KINGSTON/lake_data")
+else:  # Linux (Pi)
+    OUTPUT_DIR = Path("/storage/lake_data")
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 EXCHANGE = "BINANCE_FUTURES"
 START_DATE = datetime.date(2023, 1, 1)
