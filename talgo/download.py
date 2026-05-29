@@ -276,10 +276,17 @@ def download_job(job: dict) -> bool:
     print(f"     {job['why']}")
 
     try:
+        # lakeapi's partition filter uses strict `end.date() > dt`, so to
+        # include `job["end"]` we pass the following day at 00:00 as an
+        # exclusive upper bound. Without this, single-day chunks (level_1,
+        # trades) silently return "No files Found" even though the data
+        # exists on S3.
         df = lakeapi.load_data(
             table=job["table"],
             start=datetime.datetime.combine(job["start"], datetime.time.min),
-            end=datetime.datetime.combine(job["end"], datetime.time.max),
+            end=datetime.datetime.combine(
+                job["end"] + datetime.timedelta(days=1), datetime.time.min
+            ),
             symbols=job["symbols"],
             exchanges=[EXCHANGE],
             boto3_session=BOTO_SESSION,
