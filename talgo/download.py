@@ -5,14 +5,13 @@ BTC-USDT-PERP only, everything from 2023-01-01
 """
 
 import datetime
+import gc
 import os
 import platform
+import shutil
 import sys
 import time
 from pathlib import Path
-
-import lakeapi
-import pandas as pd
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CREDENTIALS
@@ -58,19 +57,100 @@ else:
     BOTO_SESSION = boto3.Session(region_name=AWS_DEFAULT_REGION)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SETTINGS
+# STORAGE / RUNTIME PATHS
+# Move outputs, cache, and temp files to external storage.
 # ─────────────────────────────────────────────────────────────────────────────
 
-if platform.system() == "Darwin":  # macOS
-    OUTPUT_DIR = Path("/Volumes/KINGSTON/lake_data")
-else:  # Linux (Pi)
-    OUTPUT_DIR = Path("/storage/lake_data")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+if platform.system() == "Darwin":  # macOS desktop
+    STORAGE_ROOT = Path("/Volumes/KINGSTON")
+else:  # Linux (Pi)
+    STORAGE_ROOT = Path("/storage")
+
+OUTPUT_DIR = STORAGE_ROOT / "lake_data"
+CACHE_DIR = STORAGE_ROOT / ".lake_cache"
+TMP_DIR = STORAGE_ROOT / "tmp"
+
+
+def configure_runtime_paths() -> None:
+    """Ensure output/cache/temp all live on STORAGE_ROOT."""
+    os.chdir(PROJECT_ROOT)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Route temp files away from small system disks.
+    os.environ["TMPDIR"] = str(TMP_DIR)
+    os.environ["TMP"] = str(TMP_DIR)
+    os.environ["TEMP"] = str(TMP_DIR)
+    os.environ["JOBLIB_TEMP_FOLDER"] = str(TMP_DIR)
+
+    # lakeapi uses relative .lake_cache paths; force them onto STORAGE_ROOT.
+    local_cache_link = PROJECT_ROOT / ".lake_cache"
+
+    if local_cache_link.exists() and not local_cache_link.is_symlink():
+        if local_cache_link.resolve() != CACHE_DIR.resolve():
+            shutil.rmtree(local_cache_link, ignore_errors=True)
+
+    if local_cache_link.is_symlink():
+        target = local_cache_link.resolve()
+        if target != CACHE_DIR.resolve():
+            local_cache_link.unlink()
+            local_cache_link.symlink_to(CACHE_DIR, target_is_directory=True)
+    elif not local_cache_link.exists():
+        local_cache_link.symlink_to(CACHE_DIR, target_is_directory=True)
+
+
+configure_runtime_paths()
+
+# Import after runtime path setup so lakeapi cache/temp resolve to /storage paths.
+import lakeapi
 
 EXCHANGE = "BINANCE_FUTURES"
 START_DATE = datetime.date(2023, 1, 1)
 END_DATE = datetime.date(2026, 3, 18)
+
+# Per-table chunking to keep memory usage low on Raspberry Pi.
+# Each job is split into smaller date windows before download.
+DEFAULT_CHUNK_DAYS = {
+    "liquidations": 30,
+    "funding": 7,
+    "open_interest": 30,
+    "candles": 365,
+    "book_1m": 14,
+    "level_1": 1,
+    "trades": 1,
+}
+
+
+def _split_date_range(start: datetime.date, end: datetime.date, chunk_days: int):
+    cur = start
+    step = datetime.timedelta(days=max(1, chunk_days))
+    one_day = datetime.timedelta(days=1)
+    while cur <= end:
+        chunk_end = min(cur + step - one_day, end)
+        yield cur, chunk_end
+        cur = chunk_end + one_day
+
+
+def expand_jobs(jobs: list[dict]) -> list[dict]:
+    expanded: list[dict] = []
+    for job in jobs:
+        chunk_days = int(job.get("chunk_days", DEFAULT_CHUNK_DAYS.get(job["table"], 0) or 0))
+        if chunk_days <= 0:
+            expanded.append(job)
+            continue
+
+        for start, end in _split_date_range(job["start"], job["end"], chunk_days):
+            chunk = job.copy()
+            chunk["start"] = start
+            chunk["end"] = end
+            expanded.append(chunk)
+
+    return expanded
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOWNLOAD LIST  (BTC-USDT-PERP only)
@@ -203,6 +283,8 @@ def download_job(job: dict) -> bool:
             symbols=job["symbols"],
             exchanges=[EXCHANGE],
             boto3_session=BOTO_SESSION,
+            use_threads=False,  # lower RAM usage on Pi
+            cached=False,  # avoid huge .lake_cache growth
         )
 
         if df is None or df.empty:
@@ -214,6 +296,11 @@ def download_job(job: dict) -> bool:
 
         mb = out.stat().st_size / 1024 / 1024
         print(f"  ✓  {len(df):,} rows  →  {mb:.0f} MB  saved\n")
+
+        # Explicit cleanup to reduce memory pressure on small machines.
+        del df
+        gc.collect()
+
         return True
 
     except Exception as e:
@@ -282,7 +369,8 @@ def show_summary():
 
 
 def run_tier(tier: int):
-    jobs = [j for j in DOWNLOADS if j["tier"] == tier]
+    base_jobs = [j for j in DOWNLOADS if j["tier"] == tier]
+    jobs = expand_jobs(base_jobs)
 
     tier_labels = {
         1: "Small files  (liquidations, funding, OI, candles)",
@@ -292,7 +380,7 @@ def run_tier(tier: int):
 
     print(f"\n{'═' * 55}")
     print(f"  TIER {tier}: {tier_labels.get(tier, '')}")
-    print(f"  {len(jobs)} downloads")
+    print(f"  {len(jobs)} downloads (expanded from {len(base_jobs)} job definitions)")
     print(f"{'═' * 55}\n")
 
     check_usage()
